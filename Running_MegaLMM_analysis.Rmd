@@ -1,0 +1,248 @@
+---
+title: "Running MegaLMM in wheat"
+output: rmarkdown::html_vignette
+
+---
+
+```{r}
+library(MegaLMM)
+```
+
+To introduce the application of MegaLMM for multitrait analysis and genomic selection.
+
+```{r}
+#agronomic data pareparation 
+library(tibble)
+
+seed = 1  # for reproducibility
+
+#########################################################
+#Combine the phenotype and markers data of all the trials
+
+setwd("~/Documents/Data_geno_pheno_for_selected_trials/")
+files = c("Phenotype_YldQt_Val_2014.csv","Phenotype_ABBmid_2014_Blacksburg_Warsaw.csv", "Phenotype_ABBmid_2014_Lexingoton_Woodford.csv" ,"phenotype_CSR-Val_2015_Mead.csv","phenotype_HWWpanel_2012_mead.csv",
+           "Phenotype_HWWpanel_2012_Tipton.csv") # the list of files to be read
+
+dat_comb = tibble() # empty tible to collect all the phenotype data
+
+
+#########]
+# The loop that work to read the data and subset the necessary columns for the anlaysis 
+#######################################################################################
+
+for(file in files) {
+file_read = read.csv(file = file) # read the csv format of each file
+colnm = c("loc","geno","year","rep","Test_weight","Grain_Yield","Plant_height")
+#select the files columens 
+file_read$loc = as.factor(file_read$locationName)
+file_read$geno = as.factor(file_read$germplasmName)
+file_read$year = as.factor(file_read$studyYear)
+file_read$rep = as.factor(file_read$replicate)
+file_read$Test_weight = file_read$Grain.test.weight...g.l.CO_321.0001210
+file_read$Grain_Yield = file_read$Grain.yield...kg.ha.CO_321.0001218
+file_read$Plant_height = file_read$Plant.height...cm.CO_321.0001301
+
+col_ad = colnm[which(!colnm %in% colnames(file_read))]
+for(i in col_ad){
+  file_read[,paste(i)] = NA
+  
+}
+
+
+file_sel = file_read[,c("loc","geno","year","rep","Test_weight","Grain_Yield","Plant_height")]
+dat_comb = rbind(dat_comb,file_sel)
+
+}
+dim(dat_comb)
+head(dat_comb)
+# Change to factor the factor variables in the combined data 
+dat_comb$loc = as.factor(dat_comb$loc)
+dat_comb$geno = as.factor(dat_comb$geno)
+dat_comb$year = as.factor(dat_comb$year)
+dat_comb$rep = as.factor(dat_comb$year)
+levels(dat_comb$geno)
+
+```
+
+
+```{r}
+# read the relationship matrix - the combined relationship matrix 
+Kmatrix = read.csv("combined_realtionship_matrix.csv") #combGmat # the combined relationship matrix 
+head(Kmatrix[,1:14])
+rownames(Kmatrix) <- Kmatrix$X # add the row name of the matrix 
+Kmatrix = as.matrix(Kmatrix[,-1]) #remove the first column of the matrix
+dat_comb # the phenotypic and design matrix data imported data 
+head(dat_comb)
+########################
+# set up the necessary files for the MegaLMM analyss
+################################################
+#The setup data from the package used as a base to organize the files necessary 
+################################################
+design_dat = dat_comb[, c("loc","geno","year", "rep")] # subseting the desing matrix 
+design_dat$intercept = 1 # add the intercept in the design matrix
+design_dat = design_dat[,c("intercept","loc", "geno")] # select the design matrix to be fitted in the model
+head(design_dat)
+load('setup.RData') # load the sample setup file from MegaLMM
+setupT = setup # create the new setup file - this file contain a lot of parameter files
+setupT$data = design_dat # add the design matrix in the setup file
+setupT$Y = dat_comb[,c("Test_weight","Grain_Yield", "Plant_height")] # add the traits in the setup file
+setupT$K = Kmatrix # add the relationship matrix in the setup file 
+
+ind_k = which(rownames(setupT$K) %in% setupT$data$geno) # the rowname of the K that found in design matrix
+ind_d = which(setupT$data$geno %in% colnames(setupT$K)) # the geno name in the desing matrix found in the k matrix
+head(setupT$K[,1:15])
+setupT$K = setupT$K[ind_k, ind_k] # subset the K matrix based on the index 
+dim(setupT$K)
+setupT$data = setupT$data[ind_d,] # subset the design matrix that found in the Kmatrix and add in the setup file
+setupT$Y = setupT$Y[ind_d,] # subset the response ariables (tratis) 
+all(setupT$data$geno %in% colnames(setupT$K)) 
+setupT$B = matrix(data = 0, nrow = 2, ncol = 3) # add the matrix B parameter (ncol is the lenght of the traits)
+setupT$B_F = matrix(data = 0, nrow = 1, ncol = 10) # add the BF matrix ()
+setupT$Lambda = matrix(data = 0, nrow = 10, ncol = 3) # add lambda (ncol is the trait number)
+setupT$G = matrix(data = 0, nrow = 3, ncol = 3) # add the G matrix (ncol and nrow as the length of trait numbers)
+setupT$R = matrix(data = 0, nrow = 3, ncol = 3) # add the R matrix (ncol and nrow as the lenth of trait numbers)
+setupT$X = setupT$data[,c(1,2)] # add the X - fixed effect matrix - subset from the desing matrix 
+```
+
+
+## Set the parameters of the MegaLMM model
+
+
+```{r}
+# The standard parameter setup in the MegaLMM
+run_parameters = MegaLMM_control(
+  max_NA_groups = 3,
+  scale_Y = FALSE,   # should the columns of Y be re-scaled to have mean=0 and sd=1?
+  h2_divisions = 20, # Each variance component is allowed to explain between 0% and 100% of the total variation. How many segments should the range [0,100) be divided into for each random effect?
+  h2_step_size = NULL, # if NULL, all possible values of random effects are tried each iteration. If in (0,1), a new candidate set of random effect proportional variances is drawn uniformily with a range of this size
+  burn = 00,  # number of burn in samples before saving posterior samples
+  K = 15 # number of factors
+)
+
+```
+
+
+
+## Set the prior hyperparameters of the MegaLMM model
+
+```{r}
+# the standard periors set by the MegaLMM
+priors = MegaLMM_priors(
+  tot_Y_var = list(V = 0.5,   nu = 5),      # Prior variance of trait residuals after accounting for fixed effects and factors
+  tot_F_var = list(V = 18/20, nu = 20),     # Prior variance of factor traits. This is included to improve MCMC mixing, but can be turned off by setting nu very large
+  Lambda_prior = list(
+    sampler = sample_Lambda_prec_horseshoe, # function that implements the horseshoe-based Lambda prior described in Runcie et al 2020. See code to see requirements for this function.
+    prop_0 = 0.1,    # prior guess at the number of non-zero loadings in the first and most important factor
+    delta = list(shape = 3, scale = 1),    # parameters of the gamma distribution giving the expected change in proportion of non-zero loadings in each consecutive factor
+    delta_iterations_factor = 100   # parameter that affects mixing of the MCMC sampler. This value is generally fine.
+  ),
+  h2_priors_resids_fun = function(h2s,n)  1,  # Function that returns the prior density for any value of the h2s vector (ie the vector of random effect proportional variances across all random effects. 1 means constant prior. Alternative: pmax(pmin(ddirichlet(c(h2s,1-sum(h2s)),rep(2,length(h2s)+1)),10),1e-10),
+  h2_priors_factors_fun = function(h2s,n) 1 # See above. Another choice is one that gives 50% weight to h2==0: ifelse(h2s == 0,n,n/(n-1))
+)
+```
+
+
+
+## Construct the model
+
+
+```{r}
+
+Y1 = setupT$Y
+head(Y1)
+data1 = setupT$data
+head(data1)
+K1 = setupT$K
+dim(K1)
+dim(data1)
+MegaLMM_state = setup_model_MegaLMM(Y1,            # n x p data matrix
+                              ~ loc + (1|geno),  # RHS of base model for factors and residuals. Fixed effects defined here only apply to the factor residuals.
+                              data = data1,       # the data.frame with information for constructing the model matrices
+                              relmat = list(geno = K1), # covariance matrices for the random effects. If not provided, assume uncorrelated
+                              run_parameters=run_parameters,
+                              run_ID = 'MegaLMM_example'
+                                )
+
+maps = make_Missing_data_map(MegaLMM_state)
+MegaLMM_state = set_Missing_data_map(MegaLMM_state,maps$Missing_data_map)
+
+MegaLMM_state = set_priors_MegaLMM(MegaLMM_state,priors)  # apply the priors
+MegaLMM_state = initialize_variables_MegaLMM(MegaLMM_state) # initialize the model
+MegaLMM_state = initialize_MegaLMM(MegaLMM_state) # run the initial calculations
+MegaLMM_state = clear_Posterior(MegaLMM_state) # prepare the output directories
+
+```
+
+
+## Run MCMC
+
+
+```{r results="hide"}
+library(microbenchmark)
+# The following code is optional, but tries to guess for your system how many CPUs to use for fastest processing
+(n_threads = optimize_n_threads(MegaLMM_state,seq(1,RcppParallel::defaultNumThreads(),by=1),times=2))
+set_MegaLMM_nthreads(n_threads$optim)
+# now do sampling is smallish chunks
+n_iter = 100;  # how many samples to collect at once?
+for(i  in 1:5) {
+  print(sprintf('Run %d',i))
+  MegaLMM_state = sample_MegaLMM(MegaLMM_state,n_iter)  # run MCMC chain n_samples iterations. grainSize is a paramter for parallelization (smaller = more parallelization)
+  
+  MegaLMM_state = save_posterior_chunk(MegaLMM_state)  # save any accumulated posterior samples in the database to release memory
+  print(MegaLMM_state) # print status of current chain
+  plot(MegaLMM_state) # make some diagnostic plots. These are saved in a pdf booklet: diagnostic_plots.pdf
+
+  # set of commands to run during burn-in period to help chain converge
+  if(MegaLMM_state$current_state$nrun < MegaLMM_state$run_parameters$burn || i < 3) {
+    MegaLMM_state = reorder_factors(MegaLMM_state,drop_cor_threshold = 0.6) # Factor order doesn't "mix" well in the MCMC. We can help it by manually re-ordering from biggest to smallest
+    MegaLMM_state = clear_Posterior(MegaLMM_state)
+    print(MegaLMM_state$run_parameters$burn)
+  }
+}
+```
+
+
+
+```{r}
+# Because this was a simulation, we can make some special diagnostic plots by passing in the true values
+plot(MegaLMM_state,setup = setupT) 
+dim(setup$R)
+setupT$X = data1[,1:2]
+```
+
+Look for the output in the `MegaLMM_example` (our `run_ID`) directory.
+
+
+## Work with the Posterior samples
+
+```{r}
+# reload the whole database of posterior samples
+MegaLMM_state$Posterior = reload_Posterior(MegaLMM_state)
+dim(MegaLMM_state$Posterior$Eta_mean)
+prd_mean = cbind(as.data.frame(data1$geno),MegaLMM_state$Posterior$Eta_mean) # estimated mean for the genotypes
+write.csv(x = prd_mean, file = "MegaLMMpredicted_mean.csv", row.names = T) # write to the computer as a csv format
+dim(setupT$Y)
+# all parameter names in Posterior
+MegaLMM_state$Posterior$posteriorSample_params
+MegaLMM_state$Posterior$posteriorMean_params  # these ones only have the posterior mean saved, not individual posterior samples
+
+# instead, load only a specific parameter
+Lambda = load_posterior_param(MegaLMM_state,'Lambda')
+
+# boxplots are good ways to visualize Posterior distributions on sets of related parameters
+boxplot(MegaLMM_state$Posterior$F_h2[,1,])
+
+# get posterior distribution on a function of parameters
+# This is how to calculate the G-matrix for random effect #1 (ie animal above.)
+G_samples = get_posterior_FUN(MegaLMM_state,t(Lambda) %*% diag(F_h2['geno',]) %*% Lambda + diag(resid_h2['geno',]/tot_Eta_prec[1,]))
+dim(G_samples)
+# get posterior mean of a parameter
+G = get_posterior_mean(G_samples)
+
+# get Highest Posterior Density intervals for paramters
+F_h2_HPD = get_posterior_HPDinterval(MegaLMM_state,F_h2)
+
+# make a boxplot to summarize a subset of parameters.
+boxplot(MegaLMM_state$Posterior$B1[,1,],outline=F);abline(h=0)
+```
+
