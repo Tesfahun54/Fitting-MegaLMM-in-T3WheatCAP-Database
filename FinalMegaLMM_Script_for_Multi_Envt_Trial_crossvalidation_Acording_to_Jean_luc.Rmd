@@ -1,0 +1,1230 @@
+---
+title: "Cross validation MegaLMM_final and GBLUP"
+author: "Tesfahun A. Setotaw"
+date: "2023-09-01"
+output: html_document
+---
+---
+title: "Multi Environment analysis using MegaLMM - cross validation"
+author: "Tesfahun A. Setotaw"
+date: "2023-08-31"
+output: html_document
+---
+
+```{r setup, include=FALSE, echo=FALSE}
+require("knitr")
+
+opts_knit$set(root.dir = "~/Documents/MegaLMMM/Data/Data_based_on_JL_recommendation/") # setting the working director 
+```
+
+# Data importing and preparation for the analysis
+
+```{r}
+library(MegaLMM) # load the package
+library(ggplot2)
+library(lme4)
+library(rrBLUP)
+library(sommer)
+library(gridExtra)
+
+```
+
+To introduce the application of MegaLMM for multitrait analysis and genomic selection.
+
+```{r}
+##################################################
+# Import phenotypic data and prepare for analysis 
+#################################################
+library(tibble) # 
+
+seed = 1  # for reproducibility
+
+setwd("~/Documents/MegaLMMM/Data/Data_based_on_JL_recommendation/") # set the working directory 
+
+phen = read.csv("phenotype_AMP_LRpanel_with_90k_32common.csv") # read the file 
+phen$loc = as.factor(phen$locationName) # rename the factors accordingly
+phen$studyName = as.factor(phen$studyName)
+phen$geno = as.factor(phen$germplasmName)
+phen$year = as.factor(phen$studyYear)
+
+phen$rep = as.factor(phen$replicate)
+phen$block = as.factor(phen$blockNumber)
+phen$test_weight = phen$Grain.test.weight...g.l.CO_321.0001210 # rename the traits 
+phen$Plant_height = phen$Plant.height...cm.CO_321.0001301 
+phen$Grain_Yield = phen$Grain.yield...kg.ha.CO_321.0001218
+summary(phen)
+unique(phen$geno)
+id = which(phen$Grain_Yield == 0) # select the trait with value 0, to remove it
+id # if this value is zero  not to run the next line
+phen[id,"Grain_Yield"] = NA
+```
+
+
+#Remove outliers if necessary
+
+```{r}
+#ploting the availability of genotypes in respective environments 
+Image(as.matrix(table(phen$geno,phen$studyName))) + theme(legend.position = 'none') + xlab('Environment') + ylab('Line') 
+```
+
+
+```{r}
+# The histogram 
+hist(table(phen$geno),main = 'Environments per line',breaks=20)
+hist(table(phen$studyName),main = 'Lines per Environment',breaks=20)
+```
+```{r}
+# Arranging the BLUE estimate data of the genotypes across environment 
+##############################################
+## To change from wide format to long format 
+#############################################
+########################
+library(tibble)
+# to change to long data type the orginal blue data
+Traits = c( "Grain_Yield") # list the traits 
+head(phen)
+summary(phen)
+prd_BLUE_long = tibble() # To change the trait to long format 
+phen$studyName
+phen$geno
+for(Trait in Traits){
+  dt = phen[,c("studyName", "geno", paste(Trait))]
+  colnames(dt)[3] = "BlueMean"
+  dt1 = cbind(dt,Trait = paste(Trait))
+  prd_BLUE_long = rbind(prd_BLUE_long,dt1)
+}
+
+head(prd_BLUE_long)
+
+#produce the boxplot of the raw data
+library(ggplot2)
+plt = ggplot(data = prd_BLUE_long, mapping = aes(x = studyName, y = BlueMean)) +
+  geom_boxplot() 
+  plt + facet_wrap(~Trait, scales = "free_y") + theme_bw() +
+    theme(axis.text.x = element_text(angle = 90))
+  
+  summary(prd_BLUE_long)
+```
+
+```{r}
+###############################################
+# change the data to wide type 
+# Change the data in to wide type - to have the  Trait by environment data
+library(reshape2) # load the reshape package
+unique(phen$rep) # This is done for single rep data (BlUEs of the trait)
+prd_BLUE_long$studyName = as.factor(prd_BLUE_long$studyName)
+prd_BLUE_long$Trait = as.factor(prd_BLUE_long$Trait)
+prd_BLUE_long$StudyNameTrait = prd_BLUE_long$studyName:prd_BLUE_long$Trait
+prd_BLUE_long$StudyNameTrait = gsub(pattern = ":", replacement = "_", x = prd_BLUE_long$StudyNameTrait)
+prd_BLUE_long$StudyNameTrait = as.factor(prd_BLUE_long$StudyNameTrait)
+
+BlueMean_All_Trait_wide = dcast(data = prd_BLUE_long, formula = geno ~ StudyNameTrait, fun.aggregate = mean, value.var = "BlueMean")
+head(BlueMean_All_Trait_wide)
+summary(BlueMean_All_Trait_wide)
+dim(BlueMean_All_Trait_wide)
+########################################
+#Removing envt with all values NA
+colnam = c() # the list of trial trait combination all values are NAs
+for(i in colnames(BlueMean_All_Trait_wide)[-1]){
+ n =  length(which(is.na(BlueMean_All_Trait_wide[,i])))
+ if(n == length(BlueMean_All_Trait_wide[,i])){
+  colnam = c(colnam, i)
+ }
+}
+n_col = which(names(BlueMean_All_Trait_wide) %in% colnam)
+if(length(n_col) == 0){
+BlueMean_All_Trait_wide_withOut_NA = BlueMean_All_Trait_wide
+}else{
+ BlueMean_All_Trait_wide_withOut_NA = BlueMean_All_Trait_wide[,-n_col] 
+}
+dim(BlueMean_All_Trait_wide_withOut_NA)
+#####################################################
+# removing the outliers - since the trial is single replication the boxplot stat was used to remove the outlier
+#####################################################
+BlueMean_All_Trait_wide_withOut_NA_wo_outlier = BlueMean_All_Trait_wide_withOut_NA
+for(i in colnames(BlueMean_All_Trait_wide_withOut_NA[-1])){
+  id = which(BlueMean_All_Trait_wide_withOut_NA[,i] %in% boxplot.stats(BlueMean_All_Trait_wide_withOut_NA[,i])$out) # outlier based on boxstatistics
+  BlueMean_All_Trait_wide_withOut_NA_wo_outlier[id, i] = NA # substitute the outliers with NA values
+}
+summary(BlueMean_All_Trait_wide_withOut_NA_wo_outlier)
+dim(BlueMean_All_Trait_wide_withOut_NA_wo_outlier)
+#######################################################
+# # removing trials with low number of observed values
+for(i in colnames(BlueMean_All_Trait_wide_withOut_NA_wo_outlier)){
+nobs = length(which(!is.na(BlueMean_All_Trait_wide_withOut_NA_wo_outlier[,i])))
+if(nobs <= 0.3*nrow(BlueMean_All_Trait_wide_withOut_NA_wo_outlier)){
+  BlueMean_All_Trait_wide_withOut_NA_wo_outlier = BlueMean_All_Trait_wide_withOut_NA_wo_outlier[,!colnames(BlueMean_All_Trait_wide_withOut_NA_wo_outlier) %in% i]
+}
+}
+dim(BlueMean_All_Trait_wide_withOut_NA_wo_outlier)
+summary(BlueMean_All_Trait_wide_withOut_NA_wo_outlier)
+#######################################
+# removing traits  have a single value (observation)
+for(i in colnames(BlueMean_All_Trait_wide_withOut_NA_wo_outlier)[-1]){
+      id = which(!is.na(BlueMean_All_Trait_wide_withOut_NA_wo_outlier[,i]))
+      
+      if(length(id) == 1){
+  BlueMean_All_Trait_wide_withOut_NA_wo_outlier[id, i] = NA
+      }
+}
+
+# checking for the variance of the traits - if variance is zero, the trait should be removed from the analsyis
+which(round(apply(BlueMean_All_Trait_wide_withOut_NA_wo_outlier[,-1], MARGIN = 2, FUN = var, na.rm = T),3) == 0) # check for the zero variance 
+dim(BlueMean_All_Trait_wide_withOut_NA_wo_outlier)
+head(BlueMean_All_Trait_wide_withOut_NA_wo_outlier)
+summary(BlueMean_All_Trait_wide_withOut_NA_wo_outlier)
+ #BlueMean_All_Trait_wide_withOut_NA_wo_outlier = BlueMean_All_Trait_wide_withOut_NA_wo_outlier[,-22]
+```
+
+
+
+# Import and arrange the marker data according to the format and estimate the relatioship matrix among genotypes 
+```{r}
+# read the relationship matrix - the combined relationship matrix 
+# read genotype data
+library(readr) # Load package to read the .tsv format data 
+mark = read_tsv(file = "SNPs_AMP_LRpanel_90K_32common.tsv", col_names = T)
+
+mark = as.data.frame(mark)
+library(sommer)
+dim(mark)
+rownames(mark) = mark$Marker # naming the row using the marker names
+
+Tmark = t(mark[,-1]) # transposed marker data (genotype row, snp column)
+colnames(Tmark) <- rownames(mark)
+# Kinship relationship matrix - Addative model 
+# Remove markers with NA value greater than 0.2 (20%)
+dim(Tmark)
+
+head(Tmark[,1:10])
+x = c()
+for(i in 1:length(colnames(Tmark))){
+  if(length(which(is.na(Tmark[,i]))) > 200){ # to list the genotypes with NA value greater than 20%
+    x = c(x,i)
+  }
+  
+}
+
+# removing the markers with missing value greater than 20% 
+if(length(x) == 0){
+  Tmark1 = Tmark
+}else{
+  Tmark1 = Tmark[,-x]
+}
+
+dim(Tmark1)
+###############################################################
+## IMpute the NA values with the average of the dosage markers 
+##############################################################
+library(genomicMateSelectR)
+Tmarkf = maf_filter(M = Tmark1, thresh = 0.05) # filtering based on the minimum allele frequency
+dim(Tmarkf)
+
+missing_av = apply(X = Tmarkf, MARGIN = 2, FUN = mean, na.rm = T) # impute the data based on the average value 
+for(i in 1:ncol(Tmarkf)){
+  Tmarkf[is.na(Tmarkf[,i]), i] <- missing_av[i]
+}
+Tmarkf[1:10,1:10]
+
+KinAD = kinship(M = Tmarkf, type = "add") # Kinship with the additive model 
+head(KinAD[1:10,1:10])
+
+length(which(rownames(KinAD) %in% unique(phen$geno))) # the number of the genotypes found in kinship matrix and phenotyped
+
+Image(KinAD, include_zero = F) # to see the image of the relationship matrix 
+heatmap(KinAD) # the heat map of the relationship matrix 
+
+
+```
+
+```{r}
+# Define the desing matrix and the response variables 
+Kmatrix = KinAD
+
+#The design matrix 
+designMat = as.data.frame(BlueMean_All_Trait_wide_withOut_NA_wo_outlier[,1]) # subseting the genotype column 
+head(BlueMean_All_Trait_wide_withOut_NA_wo_outlier)
+colnames(designMat)[1] = "geno" # rename the column 
+designMat$intercept = 1 # add the intercept on the design matrix 
+designMat = designMat[,c(2,1)] # rearrange the position of the desing matrix 
+designMat = designMat[sort(designMat$geno),] # sort the data based on the genotype
+idgeno = which(designMat$geno %in% rownames(Kmatrix)) # subset the genotypes shared by the phenotype and marker data 
+designMat = designMat[idgeno,] # subseting the genotypes with marker data
+dim(designMat)
+idmark = which(rownames(Kmatrix) %in% designMat$geno) # genotypes with marker data found in phenotype data 
+
+Kmatrix = Kmatrix[idmark,idmark] # index the marker data with phenotype data
+all(rownames(Kmatrix) %in% designMat$geno) # cross check if all the genotypes in the marker data found in the phenotype data matrix 
+dim(Kmatrix)
+##################################
+# Organizing the phenotype data 
+Y1 = BlueMean_All_Trait_wide_withOut_NA_wo_outlier # rename the data 
+rownames(Y1) <- Y1$geno # row name the data using the genotype name
+Y1$geno %in% designMat$geno 
+Y1 = Y1[sort(rownames(Y1)),] # sort the data based on the rownames of the phenotype data (genotype name)
+Y1 = Y1[,-1] # removing the genotype column 
+
+Y1 = Y1[idgeno,] # sub-setting based on the index
+dim(Y1)
+summary(Y1)
+# Checking for the zero variance for each trait
+which(round(apply(Y1, 2, FUN = var, na.rm = T),3) == 0)
+```
+
+```{r cars}
+#check if all the genotypes found in the genetic relationship matrix 
+
+
+all(rownames(KinAD) %in% designMat$geno)
+idm = which(rownames(KinAD) %in% designMat$geno)
+K = KinAD[idm, idm]
+head(K[1:5,1:5])
+dim(Y1)
+dim(K)
+rownames(K) %in% designMat$geno
+designMat$geno %in% rownames(K)
+```
+
+
+#Cross validation analysis for the traits under consideration.
+
+```{r cars}
+# the cross validation - for 20 repetition and 5 folds
+set.seed(1)
+dim(Y1)
+fold_ID_matrix_rep = list() # the storage box for the the repetition of the five fold
+for(j in 2){ # 1:10 is the number of repetition 
+k_fold = 5 # we will hold out 1/5 = 20% of the observations from each environment
+fold_ID_matrix1 = matrix(NA,nrow = nrow(Y1),ncol = ncol(Y1),dimnames = dimnames(Y1)) # matrix to deposit the folds
+
+Y1 = as.matrix(Y1)
+
+for(i in 1:ncol(fold_ID_matrix1)) {
+  observed_lines1 = designMat[!is.na(as.data.frame(Y1[,i])),]
+  # pop = names(sort(table(observed_lines1),decreasing=T))
+  # observed_lines1 = observed_lines1
+  n_lines = nrow(observed_lines1)
+  observed_lines1$fold = sample(rep(1:k_fold,(n_lines/k_fold)+1))[1:n_lines]
+  fold_ID_matrix1[match(observed_lines1$geno,rownames(fold_ID_matrix1)),i] = observed_lines1$fold
+  
+  fold_ID_matrix_rep[[j]] = fold_ID_matrix1
+}
+
+}
+
+########################################################################
+# preparing the testing set and the training set  for cross validation - 
+########################################################################
+# For five fold cross validation
+# 1. The environments with reasonable amount of information were considered
+# 2. In each environment the observations will be subdivided into five 
+# 3. Each fold will be used as a test set and the 4fold will be used as a training set.
+
+library(MegaLMM)
+Acc_MegaLMM = tibble()
+colnames(Y1)
+
+for(i in 1:length(fold_ID_matrix_rep)){
+fold_ID_matrix1 = fold_ID_matrix_rep[[i]]
+for(k in 2:6){
+for(j in 1:5){
+fold_ID = j
+Y_train = Y_testing = Y1
+Y_train[fold_ID_matrix1 == fold_ID] = NA # training set samples 
+Y_testing[fold_ID_matrix1 != fold_ID | is.na(fold_ID_matrix1)] = NA # testing set samples 
+summary(fold_ID_matrix1)
+summary(Y_testing)
+dim(Y1)
+
+#####################################
+#Imput paramter for MegaLMM analysis - This are the standard for MegaLMM - I did not make much change on it
+run_parameters = MegaLMM_control(
+  h2_divisions = 20, 
+    # Each variance component is allowed to explain between 0% and 100% of the
+      # total variation. How many segments should the range [0,100) be divided 
+      # into for each random effect?
+  burn = 0,  
+    # number of burn in samples before saving posterior samples. I set this to 
+      # zero and instead run the chain in small chunks, doing the burning manually, a
+      # s described below.
+  thin = 2,
+    # during sampling, we'll save every 2nd sample to the posterior database.
+  K = k # number of factors. With 19 traits, this is likely way higher than needed.
+)
+
+# Setup the megaLMM model
+designMat$geno = as.factor(designMat$geno)
+MegaLMM_state1 = setup_model_MegaLMM(
+  Y = Y_train ,  
+    # The n x p trait matrix
+  formula = ~ (1|geno),  
+    # This is syntax like lme4 for mixed effect models. 
+      # We specify a fixed effect of population and a random effect for genotype (Line)
+  data = designMat,         
+    # the data.frame with information for constructing the model matrices
+  relmat = list(geno = K), 
+    # A list of covariance matrices to link to the random effects in formula.
+      # each grouping variable in formula can be linked to a covariance matrix.
+      # If so, every level of the grouping variable must be in the rownames of K.
+      # additional rows of K not present in data will still be predicted 
+        # (and therefore will use memory and computational time!)
+  run_parameters=run_parameters,
+    # This list of control parameters created above
+  run_ID = sprintf('MegaLMM_fold_%02d',fold_ID)
+    # A run identifier. The function will create a folder with this name 
+      # and store lots of useful data inside it
+)
+
+##Set lambda prior
+Lambda_prior = list(
+    sampler = sample_Lambda_prec_horseshoe, 
+      # function that implements the horseshoe-based Lambda prior 
+          # described in Runcie et al 2020. 
+          #See code to see requirements for this function.
+      # other options are:
+          # ?sample_Lambda_prec_ARD,
+          # ?sample_Lambda_prec_BayesC
+    prop_0 = 0.1,    
+      # prior guess at the number of non-zero loadings in the first and most important factor
+    delta = list(shape = 3, scale = 1),    
+      # parameters of the gamma distribution giving the expected change 
+          # in proportion of non-zero loadings in each consecutive factor
+    delta_iterations_factor = 100   
+      # parameter that affects mixing of the MCMC sampler. This value is generally fine.
+  )
+
+priors = MegaLMM_priors(
+  tot_Y_var = list(V = 0.5,   nu = 5),      
+    # Prior variance of trait residuals after accounting for fixed effects and factors
+      # See MCMCglmm for meaning of V and nu
+  tot_F_var = list(V = 18/20, nu = 20),     
+    # Prior variance of factor traits. This is included to improve MCMC mixing, 
+      # but can be turned off by setting nu very large
+  h2_priors_resids_fun = function(h2s,n)  1,  
+    # Function that returns the prior density for any value of the h2s vector 
+        # (ie the vector of random effect proportional variances across all random effects. 
+        # 1 means constant prior. 
+        # n is the number of h2 divisions above (here=20)
+        # 1-n*sum(h2s)/n linearly interpolates between 1 and 0, 
+            # giving more weight to lower values
+  h2_priors_factors_fun = function(h2s,n) 1, 
+    # See above. 
+        # sum(h2s) linearly interpolates between 0 and 1,
+            # giving more weight to higher values
+        # Another choice is one that gives 50% weight to h2==0: ifelse(h2s == 0,n,n/(n-1))
+  Lambda_prior = Lambda_prior
+    # from above
+)
+
+MegaLMM_state1 = set_priors_MegaLMM(MegaLMM_state1,priors)
+
+maps = make_Missing_data_map(MegaLMM_state1,max_NA_groups = ncol(Y1)+1,verbose=F)
+
+MegaLMM_state1 = set_Missing_data_map(MegaLMM_state1,maps$Missing_data_map_list[[1]])
+
+
+MegaLMM_state1 = initialize_variables_MegaLMM(MegaLMM_state1)
+
+estimate_memory_initialization_MegaLMM(MegaLMM_state1)
+MegaLMM_state1 = initialize_MegaLMM(MegaLMM_state1,verbose = T)
+
+MegaLMM_state1$Posterior$posteriorSample_params = c('Lambda','F_h2','resid_h2','tot_Eta_prec')
+MegaLMM_state1$Posterior$posteriorMean_params = 'Eta_mean'
+
+
+MegaLMM_state1$Posterior$posteriorFunctions = list(
+  U = 'U_F %*% Lambda + U_R',
+  G = 't(Lambda) %*% diag(F_h2[1,]) %*% Lambda + diag(resid_h2[1,]/tot_Eta_prec[1,])',
+  R = 't(Lambda) %*% diag(1-F_h2[1,]) %*% Lambda + diag((1-resid_h2[1,])/tot_Eta_prec[1,])',
+  h2 = '(colSums(F_h2[1,]*Lambda^2)+resid_h2[1,]/tot_Eta_prec[1,])/(colSums(Lambda^2)+1/tot_Eta_prec[1,])'
+  )
+
+MegaLMM_state1 = clear_Posterior(MegaLMM_state1)
+
+estimate_memory_posterior(MegaLMM_state1,100)
+
+library(microbenchmark)
+# The following code is optional, but tries to guess for your system how many CPUs to use for fastest processing
+(n_threads = optimize_n_threads(MegaLMM_state1,seq(1,RcppParallel::defaultNumThreads(),by=1),times=2))
+set_MegaLMM_nthreads(n_threads$optim)
+n_iter = 100
+
+for(i in 1:5) {
+  print(sprintf('Burnin run %d',i))
+    # Factor order doesn't "mix" well in the MCMC.
+    # We can help it by manually re-ordering from biggest to smallest
+  MegaLMM_state1 = reorder_factors(MegaLMM_state1,drop_cor_threshold = 0.6)
+    # clear any previous collected samples because we've re-started the chain 
+  MegaLMM_state1 = clear_Posterior(MegaLMM_state1)
+    # Draw n_iter new samples, storing the chain
+  MegaLMM_state1 = sample_MegaLMM(MegaLMM_state1,n_iter)
+    # make diagnostic plots
+  # traceplot_array(MegaLMM_state1$Posterior$Lambda,name = 'Lambda.pdf')
+  # traceplot_array(MegaLMM_state1$Posterior$U,name = 'U.pdf',
+  #                 facet_dim = 3,mask = fold_ID_matrix1 != 1)
+  print(sprintf('Completed %d burnin samples', MegaLMM_state1$current_state$nrun))
+}
+MegaLMM_state1 = clear_Posterior(MegaLMM_state1)
+
+##############
+n_iter = 250
+for(i in 1:4) {
+  print(sprintf('Sampling run %d',i))
+  MegaLMM_state1 = sample_MegaLMM(MegaLMM_state1,n_iter) 
+  MegaLMM_state1 = save_posterior_chunk(MegaLMM_state1)
+  print(MegaLMM_state1)
+}
+
+
+Lambda_samples = load_posterior_param(MegaLMM_state1,'Lambda')
+U_samples = load_posterior_param(MegaLMM_state1,'U')
+
+
+U_hat = get_posterior_mean(U_samples)
+Eta_mean = load_posterior_param(MegaLMM_state1,'Eta_mean')
+
+#Estimating the prediction accuracy 
+MegaLMM_Eta_mean_accuracy = round(diag(cor(Y_testing,Eta_mean,use='p')),4)
+acc = cbind("Factor" = k, t(data.frame(MegaLMM_Eta_mean_accuracy)))
+Acc_MegaLMM = rbind(Acc_MegaLMM, acc)
+
+}
+}
+}
+dim(Acc_MegaLMM)
+Acc_MegaLMM = Acc_MegaLMM # The out put of the crosvalidation 
+Acc_MegaLMM$Group = "Cornell_Master_2008"
+Acc_MegaLMM$Method = "MegaLMM"
+str(Acc_MegaLMM)
+head(Acc_MegaLMM)
+Acc_MegaLMM_long = data.frame() # storage for the long format
+for(i in colnames(Acc_MegaLMM)[-1]){
+ pr1 = cbind(Trial = paste(i), Factor = Acc_MegaLMM[,1],  value =  Acc_MegaLMM[,i] )
+ Acc_MegaLMM_long = rbind(Acc_MegaLMM_long, pr1)
+  
+}
+Acc_MegaLMM_long$Factor = as.factor(Acc_MegaLMM_long$Factor)
+Acc_MegaLMM_long$Accuracy = as.numeric(Acc_MegaLMM_long$value)
+Acc_MegaLMM_long$Trial = as.factor(Acc_MegaLMM_long$Trial)
+str(Acc_MegaLMM_long)
+#plotting the boxplot 
+ggplot(Acc_MegaLMM_long, mapping = aes(x = Trial, y = Accuracy, fill = Factor)) + 
+geom_boxplot()  + theme_bw() + theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) 
+
+
+```
+
+# The second crossvalidation according to Jean-Luc recommendation, one leava out cross validation 
+# Remove a location adn use as testing set, use the rest of the trials as a training set.
+
+```{r}
+# ##############################
+# The GBLUP cross validation 
+###############################
+#steps
+# arrange the data in long format (location, genotype, phenotype)
+# one location leave out cross validation
+    # 1 location used as a testing set
+    # the rest of the location used as a training set
+
+head(Y1) # long type data 
+
+Envt = colnames(Y1)
+BlueMean_with_OutNa = tibble()
+for(loc in Envt){
+  blue_test = Y1[,loc]
+  blue_test = as.data.frame(cbind(rownames(Y1), blue_test))
+  blue_test$blue_test = as.numeric(blue_test$blue_test)
+  colnames(blue_test) = c("geno","BlueMean")
+  num_na = length(which(is.na(blue_test$BlueMean)))
+  
+  if(num_na != length(blue_test$BlueMean)){
+    blue_test1= cbind(studyName = loc, blue_test)
+    head(blue_test1)
+    BlueMean_with_OutNa = rbind(BlueMean_with_OutNa, blue_test1)
+  }
+  
+}
+head(BlueMean_with_OutNa)
+dim(BlueMean_with_OutNa)
+unique(BlueMean_with_OutNa$geno)
+head(K[,1:10])
+
+library(rrBLUP)
+Perms<-1:100
+rrBLUP_predictions1 = tibble()
+
+for(perm in Perms ){
+for(i in colnames(Y1)) {
+   geno = which(!is.na(Y1[,i]))
+   Y_Sel = as.data.frame(Y1[,c(i)])
+   colnames(Y_Sel)[1]= "BlueMean"
+   Y_Sel$geno = rownames(Y1)
+   geno_names = Y_Sel$geno
+   geno_train<- geno_names[sample(length(geno_names), round(length(geno_names)*.8,0))]
+   geno_test<- geno_names[!geno_names %in% geno_train]
+   Y_Sel$y_masked= ifelse(Y_Sel$geno %in% geno_test, NA, Y_Sel[,"BlueMean"])
+   idK = which(rownames(K) %in% unique(Y_Sel$geno))
+   K1 = K[idK,idK]
+   dim(K1)
+   # accu = mixed.solve(y = Y_Sel$y_masked,
+   #                                     K = K1)$u
+   acc = kin.blup(data = Y_Sel, geno = "geno", pheno = "y_masked", K = K1)
+   acc$g
+   Y_obs = Y_Sel[Y_Sel$geno %in% geno_test, ]
+   Y_obs = as.data.frame(Y_obs)
+   Y_obs = Y_obs[order(Y_obs$geno),]
+   Y_prd = data.frame(acc$g)
+   Y_prd$geno = rownames(Y_prd)
+   Y_prd = Y_prd[Y_prd$geno %in% geno_test,]
+   Y_prd = Y_prd[order(Y_prd$geno),]
+   r = cor(Y_prd$acc.g, Y_obs$BlueMean, use = "p") 
+   r11 = cbind(Trial = paste(i),  Accuracy = r)
+   rrBLUP_predictions1= rbind(rrBLUP_predictions1, r11)
+
+}
+}
+head(rrBLUP_predictions1)
+rrBLUP_predictions1$Group = "Cornell_Master_2008"
+rrBLUP_predictions1$Method = "GBLUP1"
+
+rrBLUP_predictions$Accuracy = as.numeric(rrBLUP_predictions$Accuracy)
+rrBLUP_predictions$Trial = as.factor(rrBLUP_predictions$Trial)
+  ggplot(data = rrBLUP_predictions, mapping = aes(x = Trial, y = Accuracy, fill = Trial)) +
+    geom_boxplot() +  theme_bw() + theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) + 
+     theme(legend.position="none")
+  
+  
+  ########################
+  # GBLUP2 - General prediction 
+rrBLUP_predictions2 = tibble()
+Envt = colnames(Y1)
+Perms1 = 1:10
+library(parallel)
+library(doParallel)
+library(foreach)
+cores=detectCores()
+cl <- makeCluster(cores-2) #not to overload your computer
+registerDoParallel(cl)
+
+rrBLUP_predictions2 <- foreach(perm = Perms1) %dopar% {
+for(i in Envt){
+  library(rrBLUP)
+   Dat_test = BlueMean_with_OutNa[BlueMean_with_OutNa$studyName == i, ]
+   Dat_train = BlueMean_with_OutNa[BlueMean_with_OutNa$studyName != i, ]
+   geno_names = BlueMean_with_OutNa[BlueMean_with_OutNa$studyName == i, "geno"]
+   geno_test<- geno_names[sample(length(geno_names), round(length(geno_names)*.2,0))]
+   Dat_test$y_masked= ifelse(Dat_test$geno %in% geno_test, NA, Dat_test[,"BlueMean"])
+   idK = which(rownames(K) %in% unique(BlueMean_with_OutNa$geno))
+   K1 = K[idK,idK]
+   dim(K1)
+   head(Dat_test)
+   Dat_train$y_masked = Dat_train$BlueMean
+   Dat_comb = rbind(Dat_train, Dat_test)
+   # accu = mixed.solve(y = Y_Sel$y_masked,
+   #                                     K = K1)$u
+   acc = kin.blup(data = Dat_comb, geno = "geno", fixed = "studyName", pheno = "y_masked", K = K1)
+   
+   Y_obs = BlueMean_with_OutNa[BlueMean_with_OutNa$studyName == i, ]
+   Y_obs = Y_obs[Y_obs$geno %in% geno_test,]
+   Y_obs = Y_obs[order(Y_obs$geno),]
+   Y_prd = data.frame(acc$g)
+   Y_prd$geno = rownames(Y_prd)
+   Y_prd = Y_prd[Y_prd$geno %in% geno_test,]
+   Y_prd = Y_prd[order(Y_prd$geno),]
+   r = cor(Y_prd$acc.g, Y_obs$BlueMean, use = "p") 
+   r11 = cbind(Trial = paste(i),  Accuracy = r)
+   print(r11)
+  rrBLUP_predictions2= rbind(rrBLUP_predictions2, r11)
+    
+}
+rrBLUP_predictions2
+}
+stopCluster(cl)
+
+#Change the result into long format
+results_rrBLUP_predictions2 = tibble()
+for(i in 1:10){
+  r <- rrBLUP_predictions2[[i]]
+  results_rrBLUP_predictions2 = rbind(results_rrBLUP_predictions2,r)
+}
+
+
+
+results_rrBLUP_predictions2$Accuracy = as.numeric(results_rrBLUP_predictions2$Accuracy)
+results_rrBLUP_predictions2$Group = "Cornell_master_2008"
+
+
+
+
+outpred = list(Acc_MegaLMM = Acc_MegaLMM,rrBLUP_specific =  rrBLUP_predictions1, rrBLUP_gneral = results_rrBLUP_predictions2) 
+
+library(openxlsx)
+
+write.xlsx(x = outpred, file = "Prediction_Acc_MegaLMM_GBLUP1_2_Cornell_Master_2008.xlsx", rownames = F)
+  ############################
+  # GBLUP - General prediction 
+  #############################
+  
+# ############################
+# # GBLUP - using sommer 
+#  head(BlueMean_with_OutNa)
+# perms = 1:100
+#   studyNames = droplevels(unique(BlueMean_with_OutNa$studyName))
+#   Pred_acc_GBLUPs_Sommer = tibble()
+#  for(perm in perms) {
+#    for(i in studyNames){
+#       Train_geno = sample(x = unique(BlueMean_with_OutNa$geno),0.8 *length(unique(BlueMean_with_OutNa$geno)))
+#       Test_geno =  unique(BlueMean_with_OutNa$geno)[which(!unique(BlueMean_with_OutNa$geno) %in% Train_geno)]
+#         
+#       Train_dat = BlueMean_with_OutNa[BlueMean_with_OutNa$studyName != i,]
+#       Train_dat[Train_dat$geno %in% Test_geno, "BlueMean"] = NA
+#       dim(Train_dat)
+#   
+#       Test_dat = BlueMean_with_OutNa[BlueMean_with_OutNa$studyName == i, ]
+#       Test_dat[Test_dat$geno %in% Train_geno, "BlueMean"] = NA
+#       dim(Test_dat)
+#        
+#        Data_comb = rbind(Train_dat,Test_dat)
+#         summary(Data_comb)
+#         Data_comb$geno
+#         # idout = which(Data_comb[,"BlueMean"] %in% boxplot.stats(Data_comb[,"BlueMean"])$out)
+#         # Data_comb[idout,"BlueMean"] = NA
+#          #idtest =   which(Data_comb$studyName %in% Test_dat$studyName)
+#         idm1 = which(rownames(K) %in% Data_comb$geno)
+#         K1= K[idm1, idm1]
+#         idp1 = which(Data_comb$geno %in% rownames(K1))
+#         Data_comb1 = Data_comb[idm1,1:3]
+#         
+#         ans <- mmer(fixed = BlueMean ~ 1, 
+#                 random =  ~ vsr(geno,Gu = K1),
+#                 rcov = ~units,
+#                 data = Data_comb1)
+#         
+#       ans$U$`u:geno`$BlueMean
+#         r =  cor(Test_dat[Test_dat$geno[Test_geno],"BlueMean"],ans$U$`u:geno`$BlueMean[Test_geno], use = "p")
+#         accuracy = cbind("Test_set" = i, "Accuracy" = round(r,4))
+#         Pred_acc_GBLUPs_Sommer = rbind(Pred_acc_GBLUPs_Sommer,accuracy)
+#       } 
+#  } 
+#   
+#   str(Pred_acc_GBLUPs_Sommer)
+#   Pred_acc_GBLUPs_Sommer$Accuracy = as.numeric(Pred_acc_GBLUPs_Sommer$Accuracy)
+#   ggplot(data = Pred_acc_GBLUPs_Sommer, mapping = aes(x = Test_set, y = Accuracy, fill = Test_set)) +
+#     geom_boxplot() +  theme_bw() + theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) 
+#    
+#   
+#   
+#   
+#   
+  
+  
+```
+# Multi trait prediction using BGLR
+```{r}
+# Predicting the multitriat using BGLR - factor analytic model
+library(BGLR)
+
+# the cross validation - for 20 repetition and 5 folds
+set.seed(1)
+dim(Y1)
+fold_ID_matrix_rep = list() # the storage box for the the repetition of the five fold
+for(j in 1:2){ # 1:10 is the number of repetition 
+k_fold = 5 # we will hold out 1/5 = 20% of the observations from each environment
+fold_ID_matrix1 = matrix(NA,nrow = nrow(Y1),ncol = ncol(Y1),dimnames = dimnames(Y1)) # matrix to deposit the folds
+
+Y1 = as.matrix(Y1)
+for(i in 1:ncol(fold_ID_matrix1)) {
+  observed_lines1 = designMat[!is.na(as.data.frame(Y1[,i])),]
+  # pop = names(sort(table(observed_lines1),decreasing=T))
+  # observed_lines1 = observed_lines1
+  n_lines = nrow(observed_lines1)
+  observed_lines1$fold = sample(rep(1:k_fold,(n_lines/k_fold)+1))[1:n_lines]
+  fold_ID_matrix1[match(observed_lines1$geno,rownames(fold_ID_matrix1)),i] = observed_lines1$fold
+  
+  fold_ID_matrix_rep[[j]] = fold_ID_matrix1
+}
+
+}
+
+########################################################################
+# preparing the testing set and the training set  for cross validation - 
+########################################################################
+# For five fold cross validation
+# 1. The environments with reasonable amount of information were considered
+# 2. In each environment the observations will be subdivided into five 
+# 3. Each fold will be used as a test set and the 4fold will be used as a training set.
+
+Acc_BGLR_FA = tibble()
+
+colnames(Y1)
+length(fold_ID_matrix_rep)
+library(parallel)
+library(doParallel)
+library(foreach)
+
+#setup parallel backend to use many processors
+
+
+ Acc_BGLR_FA = tibble()
+for(i in 2:2){
+   for(j in 1:5){
+  fold_ID_matrix1 = fold_ID_matrix_rep[[i]]
+  library(BGLR)
+   
+fold_ID = j
+Y_train = Y_testing = Y1
+Y_train[fold_ID_matrix1 == fold_ID] = NA # training set samples 
+Y_testing[fold_ID_matrix1 != fold_ID | is.na(fold_ID_matrix1)] = NA # testing set samples 
+summary(fold_ID_matrix1)
+summary(Y_testing)
+dim(Y1)
+head(Y1)
+
+M2 = matrix(nrow = length(colnames(Y_train)), ncol = 4, TRUE)
+CovFA = list(type = "FA", M = M2)
+LP <- list(mar = list(K = K, model = "RKHS", Cov = CovFA))
+
+fmFAD <- Multitrait(y = Y_train, ETA = LP, nIter = 10000, 
+                    burnIn = 5000, resCov = list(type = "DIAG"),
+                    saveAt = "FA_DIAG_", verbose = F)
+
+BGLR_mean_accuracy = data.frame(round(diag(cor(Y_testing,fmFAD$ETAHat,use='p')),4))
+BGLR_mean_accuracy = t(BGLR_mean_accuracy)
+rownames(BGLR_mean_accuracy)[1] = "1"
+acc = cbind(Perms = paste(i), fold = j, BGLR_mean_accuracy)
+Acc_BGLR_FA  = rbind(Acc_BGLR_FA, acc)
+
+   }
+}
+
+dd = data.frame(Acc_BGLR_FA)
+Acc_BGLR_FA_AMPLR1  = Acc_BGLR_FA
+for(i in 1:5){
+ 
+    r1 = Acc_BGLR_FA[[i]]
+    r11 = r1[-1,]
+    Acc_BGLR_FA_AMP =  rbind(Acc_BGLR_FA_AMP,r11)
+  }
+
+Acc_BGLR_FA_AMP = as.data.frame(Acc_BGLR_FA_AMP)
+head(Acc_BGLR_FA_AMP)
+Acc_BGLR_FA_AMP$group = "AMP_panel"
+Acc_BGLR_FA_AMPLR1$group = "AMP_LRpanel"
+
+
+#change the result to long type
+AMP_long_acc = tibble()
+for(i in colnames(Acc_BGLR_FA_AMP)[-c(1,2,11)]){
+  d1 = Acc_BGLR_FA_AMP[,i]
+  d1 = t(data.frame(d1))
+  d2 = cbind(Trial = i, group = "AMP_panel", d1)
+  colnames(d2)[3] = "Accuracy"
+ AMP_long_acc =  rbind(AMP_long_acc,d2)
+}
+
+## AMPLR
+#data long 
+AMP_LR_long_acc = tibble()
+
+for(i in colnames(Acc_BGLR_FA_AMPLR1)[-c(1,2,15)]){
+  d1 = Acc_BGLR_FA_AMPLR1[,i]
+  d1 = data.frame(d1)
+  d2 = cbind(Trial = i, group = "AMP_LR_panel", d1)
+  colnames(d2)[3] = "Accuracy"
+ AMP_LR_long_acc =  rbind(AMP_LR_long_acc,d2)
+}
+
+
+Amp_comb_dat = rbind(AMP_LR_long_acc, AMP_long_acc)
+head(Amp_comb_dat)
+Amp_comb_dat$Accuracy = as.numeric(Amp_comb_dat$Accuracy)
+library(ggplot2)
+ggplot(data = Amp_comb_dat, mapping = aes(x = group, y = Accuracy, fill = group)) +
+  geom_boxplot() + theme_bw()
+
+
+
+
+```
+
+
+
+```{r}
+######################################
+# Estimating heritability of the Factors 
+##########################################
+# 1. divide the trials in to A and B
+# 2. Estimate the facotrs 
+# 3. Do anova combining the two factors togerther
+
+######################
+# Divide the trials into two
+#####################################
+#Imput paramter for MegaLMM analysis - This are the standard for MegaLMM - I did not make much change on it
+
+ FactorsH2_out = tibble()
+# Factors_comb = tibble()
+
+# for(perm in Perms2){
+# factos_perm = tibble() 
+
+
+Perms = 1:10
+dim(Y1)
+for(perm in Perms){
+Grp1_name = colnames(Y1)[sample(length(colnames(Y1)), round(length(colnames(Y1))*.5,0))]  # divide the envt into two
+Id2 = which(!colnames(Y1) %in% Grp1_name ) #subseting the second set of the envt
+Grp2_name = colnames(Y1)[Id2] # the name of the second envt
+Grp1 = Y1[,Grp1_name]# subset the data for envt 1
+Grp2 = Y1[,Grp2_name] # subset the data for envt 2
+dim(Grp1)
+dim(Y1)
+unique(designMat$geno)
+grps = list(Grp1, Grp2) # combined the groups
+Factors_comb = tibble() # storage for the output
+
+for(g in 1:length(grps)){
+
+run_parameters = MegaLMM_control(
+  h2_divisions = 20, 
+    # Each variance component is allowed to explain between 0% and 100% of the
+      # total variation. How many segments should the range [0,100) be divided 
+      # into for each random effect?
+  burn = 0,  
+    # number of burn in samples before saving posterior samples. I set this to 
+      # zero and instead run the chain in small chunks, doing the burning manually, a
+      # s described below.
+  thin = 2,
+    # during sampling, we'll save every 2nd sample to the posterior database.
+  K = 3 # number of factors. With 19 traits, this is likely way higher than needed.
+)
+
+# Setup the megaLMM model
+designMat$geno = as.factor(designMat$geno)
+MegaLMM_state1 = setup_model_MegaLMM(
+  Y = grps[[g]],  # the point where the group of envt data replaced 
+    # The n x p trait matrix
+  formula = ~ (1|geno),  
+    # This is syntax like lme4 for mixed effect models. 
+      # We specify a fixed effect of population and a random effect for genotype (Line)
+  data = designMat,         
+    # the data.frame with information for constructing the model matrices
+  relmat = list(geno = K), 
+    # A list of covariance matrices to link to the random effects in formula.
+      # each grouping variable in formula can be linked to a covariance matrix.
+      # If so, every level of the grouping variable must be in the rownames of K.
+      # additional rows of K not present in data will still be predicted 
+        # (and therefore will use memory and computational time!)
+  run_parameters=run_parameters,
+    # This list of control parameters created above
+  run_ID = 'MegaLMM_example'
+    # A run identifier. The function will create a folder with this name 
+      # and store lots of useful data inside it
+)
+
+##Set lambda prior
+Lambda_prior = list(
+    sampler = sample_Lambda_prec_horseshoe, 
+      # function that implements the horseshoe-based Lambda prior 
+          # described in Runcie et al 2020. 
+          #See code to see requirements for this function.
+      # other options are:
+          # ?sample_Lambda_prec_ARD,
+          # ?sample_Lambda_prec_BayesC
+    prop_0 = 0.1,    
+      # prior guess at the number of non-zero loadings in the first and most important factor
+    delta = list(shape = 3, scale = 1),    
+      # parameters of the gamma distribution giving the expected change 
+          # in proportion of non-zero loadings in each consecutive factor
+    delta_iterations_factor = 100   
+      # parameter that affects mixing of the MCMC sampler. This value is generally fine.
+  )
+
+priors = MegaLMM_priors(
+  tot_Y_var = list(V = 0.5,   nu = 5),      
+    # Prior variance of trait residuals after accounting for fixed effects and factors
+      # See MCMCglmm for meaning of V and nu
+  tot_F_var = list(V = 18/20, nu = 20),     
+    # Prior variance of factor traits. This is included to improve MCMC mixing, 
+      # but can be turned off by setting nu very large
+  h2_priors_resids_fun = function(h2s,n)  1,  
+    # Function that returns the prior density for any value of the h2s vector 
+        # (ie the vector of random effect proportional variances across all random effects. 
+        # 1 means constant prior. 
+        # n is the number of h2 divisions above (here=20)
+        # 1-n*sum(h2s)/n linearly interpolates between 1 and 0, 
+            # giving more weight to lower values
+  h2_priors_factors_fun = function(h2s,n) 1, 
+    # See above. 
+        # sum(h2s) linearly interpolates between 0 and 1,
+            # giving more weight to higher values
+        # Another choice is one that gives 50% weight to h2==0: ifelse(h2s == 0,n,n/(n-1))
+  Lambda_prior = Lambda_prior
+    # from above
+)
+
+MegaLMM_state1 = set_priors_MegaLMM(MegaLMM_state1,priors)
+
+maps = make_Missing_data_map(MegaLMM_state1,max_NA_groups = ncol(Y1)+1,verbose=F)
+
+MegaLMM_state1 = set_Missing_data_map(MegaLMM_state1,maps$Missing_data_map_list[[1]])
+
+
+MegaLMM_state1 = initialize_variables_MegaLMM(MegaLMM_state1)
+
+estimate_memory_initialization_MegaLMM(MegaLMM_state1)
+MegaLMM_state1 = initialize_MegaLMM(MegaLMM_state1,verbose = T)
+
+MegaLMM_state1$Posterior$posteriorSample_params = c('Lambda','F_h2','resid_h2','tot_Eta_prec')
+MegaLMM_state1$Posterior$posteriorMean_params = 'Eta_mean'
+
+
+MegaLMM_state1$Posterior$posteriorFunctions = list(
+  U = 'U_F %*% Lambda + U_R',
+  G = 't(Lambda) %*% diag(F_h2[1,]) %*% Lambda + diag(resid_h2[1,]/tot_Eta_prec[1,])',
+  R = 't(Lambda) %*% diag(1-F_h2[1,]) %*% Lambda + diag((1-resid_h2[1,])/tot_Eta_prec[1,])',
+  h2 = '(colSums(F_h2[1,]*Lambda^2)+resid_h2[1,]/tot_Eta_prec[1,])/(colSums(Lambda^2)+1/tot_Eta_prec[1,])'
+  )
+
+MegaLMM_state1 = clear_Posterior(MegaLMM_state1)
+
+estimate_memory_posterior(MegaLMM_state1,100)
+
+library(microbenchmark)
+# The following code is optional, but tries to guess for your system how many CPUs to use for fastest processing
+(n_threads = optimize_n_threads(MegaLMM_state1,seq(1,RcppParallel::defaultNumThreads(),by=1),times=2))
+set_MegaLMM_nthreads(n_threads$optim)
+n_iter = 100
+
+for(i in 1:5) {
+  print(sprintf('Burnin run %d',i))
+    # Factor order doesn't "mix" well in the MCMC.
+    # We can help it by manually re-ordering from biggest to smallest
+  MegaLMM_state1 = reorder_factors(MegaLMM_state1,drop_cor_threshold = 0.6)
+    # clear any previous collected samples because we've re-started the chain 
+  MegaLMM_state1 = clear_Posterior(MegaLMM_state1)
+    # Draw n_iter new samples, storing the chain
+  MegaLMM_state1 = sample_MegaLMM(MegaLMM_state1,n_iter)
+    # make diagnostic plots
+  # traceplot_array(MegaLMM_state1$Posterior$Lambda,name = 'Lambda.pdf')
+  # traceplot_array(MegaLMM_state1$Posterior$U,name = 'U.pdf',
+  #                 facet_dim = 3,mask = fold_ID_matrix1 != 1)
+  print(sprintf('Completed %d burnin samples', MegaLMM_state1$current_state$nrun))
+}
+MegaLMM_state1 = clear_Posterior(MegaLMM_state1)
+
+##############
+n_iter = 250
+for(i in 1:4) {
+  print(sprintf('Sampling run %d',i))
+  MegaLMM_state1 = sample_MegaLMM(MegaLMM_state1,n_iter) 
+  MegaLMM_state1 = save_posterior_chunk(MegaLMM_state1)
+  print(MegaLMM_state1)
+  
+}
+
+Factors_1 = as.data.frame(MegaLMM_state1$current_state$F)
+Factors_1$geno = droplevels(designMat$geno)
+Factors_1$Groups = paste(g)
+
+
+Factors_comb = rbind(Factors_comb, Factors_1)
+dim(Factors_comb)
+unique(Factors_comb$Groups)
+
+
+
+
+}
+library(LMMsolver)
+Factors_comb = droplevels(Factors_comb)
+LMM_group1 <- LMMsolve(fixed = V1 ~ 1,
+                      random = ~ geno,
+                      data = Factors_comb)
+
+LMMSL = LMM_group1$VarDf
+vg = LMMSL[LMMSL$VarComp == "geno", "Variance"]
+ve = LMMSL[LMMSL$VarComp == "residual", "Variance"]
+
+h2a = vg/(vg + ve)
+H2 = cbind(Trial = "AMP_LRPanel", paste(perm), Heritability = round(h2a,3))
+FactorsH2_out = rbind(FactorsH2_out, H2)
+}
+
+
+
+```
+
+
+
+# Plotting the outpus 
+```{r}
+
+##############
+# Plotting the outputs 
+
+# heritability 
+library(readxl)
+hert = read_excel(path = "Heritability_for_Factors_Anlysis.xlsx", sheet = 1)
+head(hert)
+str(hert)
+colnames(hert)[2] = "Heritability"
+hert$Trial = as.factor(hert$Trial)
+
+
+
+
+ggplot(data = hert, mapping = aes(x = Trial, y = Heritability, fill = Trial))+
+  geom_boxplot()  + theme_bw() + theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) + 
+  theme(legend.position = "none")
+
+
+######
+# 2. MegaLMM
+#1
+MegaLMM1 = read_excel(path = "Prediction_Acc_MegaLMM_GBLUP1_2_AMP_LRPanel.xlsx", sheet = 1)
+head(MegaLMM1)
+MegaLMM_long1 = tibble()
+Envt = colnames(MegaLMM1)[-c(1,14,15)]
+for(loc in Envt){
+  Accuracy = MegaLMM1[,loc]
+  Accuracy1 = as.data.frame(cbind(MegaLMM1[,c("Factor","Group")], Accuracy))
+  colnames(Accuracy1)[3] = "Accuracy"
+  MegaLMM_long1 = rbind(MegaLMM_long1, Accuracy1)
+  }
+  
+dim(MegaLMM_long1)
+
+##2
+MegaLMM2 = read_excel(path = "Prediction_Acc_MegaLMM_GBLUP1_2_AMP_Panel.xlsx", sheet = 1)
+head(MegaLMM2)
+colnames(MegaLMM2)
+MegaLMM_long2 = tibble()
+Envt = colnames(MegaLMM2)[-c(1,10,11)]
+for(loc in Envt){
+  Accuracy = MegaLMM2[,loc]
+  Accuracy1 = as.data.frame(cbind(MegaLMM2[,c("Factor","Group")], Accuracy))
+  colnames(Accuracy1)[3] = "Accuracy"
+  MegaLMM_long2 = rbind(MegaLMM_long2, Accuracy1)
+  }
+  dim(MegaLMM_long2)
+#3
+MegaLMM3 = read_excel(path = "Prediction_Acc_MegaLMM_GBLUP1_2_ARS_SRPN.xlsx", sheet = 1)
+head(MegaLMM3)
+colnames(MegaLMM3)
+MegaLMM_long3 = tibble()
+Envt = colnames(MegaLMM3)[-c(1,11,12)]
+for(loc in Envt){
+  Accuracy = MegaLMM3[,loc]
+  Accuracy1 = as.data.frame(cbind(MegaLMM3[,c("Factor","Group")], Accuracy))
+  colnames(Accuracy1)[3] = "Accuracy"
+  MegaLMM_long3 = rbind(MegaLMM_long3, Accuracy1)
+  }
+  dim(MegaLMM_long3)
+# 4 
+MegaLMM4 = read_excel(path = "Prediction_Acc_MegaLMM_GBLUP1_2_SW_AMP_Panel_2013.xlsx", sheet = 1)
+head(MegaLMM4)
+colnames(MegaLMM4)
+MegaLMM_long4 = tibble()
+Envt = colnames(MegaLMM4)[-c(1,11,12)]
+for(loc in Envt){
+  Accuracy = MegaLMM4[,loc]
+  Accuracy1 = as.data.frame(cbind(MegaLMM4[,c("Factor","Group")], Accuracy))
+  colnames(Accuracy1)[3] = "Accuracy"
+  MegaLMM_long4 = rbind(MegaLMM_long4, Accuracy1)
+  }
+  dim(MegaLMM_long4)
+#5
+MegaLMM5 = read_excel(path = "Prediction_Acc_MegaLMM_GBLUP1_2_HWW_Panel_2013_2014.xlsx", sheet = 1)
+head(MegaLMM5)
+colnames(MegaLMM5)
+MegaLMM_long5 = tibble()
+Envt = colnames(MegaLMM5)[-c(1,13,14)]
+for(loc in Envt){
+  Accuracy = MegaLMM5[,loc]
+  Accuracy1 = as.data.frame(cbind(MegaLMM5[,c("Factor","Group")], Accuracy))
+  colnames(Accuracy1)[3] = "Accuracy"
+  MegaLMM_long5 = rbind(MegaLMM_long5, Accuracy1)
+  }
+  dim(MegaLMM_long5)
+
+#6
+
+MegaLMM6 = read_excel(path = "Prediction_Acc_MegaLMM_GBLUP1_2_Cornell_Master_2008.xlsx", sheet = 1)
+head(MegaLMM6)
+colnames(MegaLMM6)
+MegaLMM_long6 = tibble()
+Envt = colnames(MegaLMM6)[-c(1,8,9)]
+for(loc in Envt){
+  Accuracy = MegaLMM6[,loc]
+  Accuracy1 = as.data.frame(cbind(MegaLMM6[,c("Factor","Group")], Accuracy))
+  colnames(Accuracy1)[3] = "Accuracy"
+  MegaLMM_long6 = rbind(MegaLMM_long6, Accuracy1)
+  }
+  dim(MegaLMM_long6)
+  
+  
+# Combine all the data
+ Acc_comb =  rbind(MegaLMM_long1, MegaLMM_long2, MegaLMM_long3, MegaLMM_long4, MegaLMM_long5, MegaLMM_long6)
+head(Acc_comb)
+str(Acc_comb)
+Acc_comb$Accuracy = as.numeric(Acc_comb$Accuracy)
+Acc_comb$Factor = as.factor(Acc_comb$Factor)
+Acc_comb$Group = as.factor(Acc_comb$Group)
+
+Mean_Acc_MegaLMM = Acc_comb %>% group_by(Group) %>%
+  summarise_at(.vars = "Accuracy", .funs = mean, na.rm = T)
+
+#plotting
+ggplot(data = Acc_comb, mapping = aes(x = Group, y = Accuracy, fill = Factor))+
+  geom_boxplot()  + theme_bw() + theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) 
+  # theme(legend.position = "none")
+
+## GBLUP specific
+GBlup1 = read_excel(path = "Prediction_Acc_MegaLMM_GBLUP1_2_AMP_LRPanel.xlsx", sheet = 2)
+
+GBlup2 = read_excel(path = "Prediction_Acc_MegaLMM_GBLUP1_2_AMP_Panel.xlsx", sheet = 2)
+GBlup3 = read_excel(path = "Prediction_Acc_MegaLMM_GBLUP1_2_ARS_SRPN.xlsx", sheet = 2)
+GBlup4 = read_excel(path = "Prediction_Acc_MegaLMM_GBLUP1_2_SW_AMP_Panel_2013.xlsx", sheet = 2)
+GBlup5 = read_excel(path = "Prediction_Acc_MegaLMM_GBLUP1_2_HWW_Panel_2013_2014.xlsx", sheet = 2)
+GBlup6 = read_excel(path = "Prediction_Acc_MegaLMM_GBLUP1_2_Cornell_Master_2008.xlsx", sheet = 2)
+GBlup1_comb = rbind(GBlup1, GBlup2, GBlup3, GBlup4, GBlup5, GBlup6)
+str(GBlup1_comb)
+GBlup1_comb$Group = as.factor(GBlup1_comb$Group)
+GBlup1_comb$Accuracy = as.numeric(GBlup1_comb$Accuracy)
+head(GBlup1_comb)
+#plotting
+ggplot(data = GBlup1_comb, mapping = aes(x = Group, y = Accuracy, fill = Group))+
+  geom_boxplot()  + theme_bw() + theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) +
+  theme(legend.position = "none")
+Mean_Acc_GBLUP_1 = GBlup1_comb %>% group_by(Group) %>%
+  summarise_at(.vars = "Accuracy", .funs = mean, na.rm = T)
+
+# GBlUP General 
+GBLUP_2_Acc = read_excel(path = "GBLUP_2_General_for_all_groups .xlsx", sheet = 1)
+head(GBLUP_2_Acc)
+str(GBLUP_2_Acc)
+GBLUP_2_Acc$Trial = as.factor(GBLUP_2_Acc$Trial)
+GBLUP_2_Acc$Accuracy = as.numeric(GBLUP_2_Acc$Accuracy)
+GBLUP_2_Acc$Group = as.factor(GBLUP_2_Acc$Group)
+ggplot(data = GBLUP_2_Acc, mapping = aes(x = Group, y = Accuracy, fill = Group))+
+  geom_boxplot()  + theme_bw() + theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) +
+  theme(legend.position = "none")
+head(GBLUP_2_Acc)
+Mean_Acc_GBLUP_2 = GBLUP_2_Acc %>% group_by(Group) %>%
+  summarise_at(.vars = "Accuracy", .funs = mean, na.rm = T )
+
+
+###Plot the scatter plot 
+
+plot(x = Mean_Acc_GBLUP_1$Accuracy, y = Mean_Acc_MegaLMM$Accuracy, type = "p", ylim = c(0,1), xlim = c(0,1), col = "blue", pch = 16, xlab = "GBLUP1 Accuracy (environment specific)", ylab = "MegaLMM Accuracy") 
+abline(a = c(0,0), b = c(1,1), col = "red", pch = 16)
+
+plot(x = Mean_Acc_GBLUP_2$Accuracy, y = Mean_Acc_MegaLMM$Accuracy, type = "p", ylim = c(0,1), xlim = c(0,1), col = "blue", pch = 16, xlab = "GBLUP2 Accuracy (General)", ylab = "MegaLMM Accuracy") 
+abline(a = c(0,0), b = c(1,1), col = "red", pch = 50)
+
+
+```
+
+
